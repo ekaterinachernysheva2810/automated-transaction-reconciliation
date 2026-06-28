@@ -1,0 +1,66 @@
+import pandas as pd
+
+def run_reconciliation():
+    print("Запуск продвинутой сверки транзакций (ID + Сумма + Статус)...")
+    
+    # 1. Загружаем данные из Excel
+    try:
+        df_internal = pd.read_excel('internal_ledger.xlsx')
+        df_bank = pd.read_excel('bank_statement.xlsx')
+    except FileNotFoundError as e:
+        print(f"Ошибка: Не найден файл данных. {e}")
+        return
+
+    # 2. Очистка и унификация данных
+    # Приводим ID к строкам и убираем пробелы
+    df_internal['Transaction_ID'] = df_internal['Transaction_ID'].astype(str).str.strip()
+    df_bank['Bank_ID'] = df_bank['Bank_ID'].astype(str).str.strip()
+    
+    # Переименовываем колонку 'Status' в банковском файле для унификации
+    df_bank = df_bank.rename(columns={'Status': 'Transaction_status'})
+    
+    # Нормализуем статусы (переводим в нижний регистр и убираем пробелы), чтобы избежать ложных расхождений
+    df_internal['Transaction_status'] = df_internal['Transaction_status'].astype(str).str.strip().str.lower()
+    df_bank['Transaction_status'] = df_bank['Transaction_status'].astype(str).str.strip().str.lower()
+    
+    # Округляем суммы до 2 знаков после запятой
+    df_internal['Transaction_amount'] = df_internal['Transaction_amount'].round(2)
+    df_bank['Transaction_amount'] = df_bank['Transaction_amount'].round(2)
+
+    # 3. Полное совпадение (Идеальный мэтч по ID, Сумме и Статусу одновременно)
+    # Используем inner join по списку ключевых колонок
+    matched = pd.merge(
+        df_internal, 
+        df_bank, 
+        left_on=['Transaction_ID', 'Transaction_amount', 'Transaction_status'], 
+        right_on=['Bank_ID', 'Transaction_amount', 'Transaction_status'], 
+        how='inner'
+    )
+    
+    # 4. Поиск расхождений (Unmatched)
+    # Находим всё, что НЕ вошло в таблицу идеальных совпадений
+    
+    # Ошибки со стороны нашей системы (есть в 1С, но нет полного совпадения в банке)
+    # Проверяем по связке ID + Сумма + Статус
+    internal_keys = df_internal['Transaction_ID'] + "_" + df_internal['Transaction_amount'].astype(str) + "_" + df_internal['Transaction_status']
+    matched_keys_internal = matched['Transaction_ID'] + "_" + matched['Transaction_amount'].astype(str) + "_" + matched['Transaction_status']
+    missing_in_bank = df_internal[~internal_keys.isin(matched_keys_internal)]
+    
+    # Ошибки со стороны банка (есть в банке, но нет полного совпадения у нас)
+    bank_keys = df_bank['Bank_ID'] + "_" + df_bank['Transaction_amount'].astype(str) + "_" + df_bank['Transaction_status']
+    matched_keys_bank = matched['Bank_ID'] + "_" + matched['Transaction_amount'].astype(str) + "_" + matched['Transaction_status']
+    missing_in_internal = df_bank[~bank_keys.isin(matched_keys_bank)]
+
+    # 5. Сохраняем результат в Excel
+    with pd.ExcelWriter('reconciliation_report.xlsx') as writer:
+        matched.to_excel(writer, sheet_name='Сверенные (Идеал)', index=False)
+        missing_in_bank.to_excel(writer, sheet_name='Расхождения у нас', index=False)
+        missing_in_internal.to_excel(writer, sheet_name='Расхождения в банке', index=False)
+        
+    print(f"\nСверка успешно завершена! Создан файл 'reconciliation_report.xlsx'")
+    print(f"Полностью совпало: {len(matched)} транзакций.")
+    print(f"Проблемные строки в нашей системе (не совпал ID/сумма/статус): {len(missing_in_bank)} шт.")
+    print(f"Проблемные строки в выписке банка (не совпал ID/сумма/статус): {len(missing_in_internal)} шт.")
+
+if __name__ == "__main__":
+    run_reconciliation()
