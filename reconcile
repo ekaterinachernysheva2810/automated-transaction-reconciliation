@@ -1,66 +1,92 @@
 import pandas as pd
 
-def run_reconciliation():
-    print("Запуск продвинутой сверки транзакций (ID + Сумма + Статус)...")
-    
-    # 1. Загружаем данные из Excel
-    try:
-        df_internal = pd.read_excel('internal_ledger.xlsx')
-        df_bank = pd.read_excel('bank_statement.xlsx')
-    except FileNotFoundError as e:
-        print(f"Ошибка: Не найден файл данных. {e}")
-        return
+# --- Step 1: Load Data Files ---
+try:
+    df_internal = pd.read_excel('internal_ledger.xlsx')
+    df_bank = pd.read_excel('bank_statement.xlsx')
+except FileNotFoundError as e:
+    print(f"Error: Data file not found. {e}")
+    exit()
 
-    # 2. Очистка и унификация данных
-    # Приводим ID к строкам и убираем пробелы
-    df_internal['Transaction_ID'] = df_internal['Transaction_ID'].astype(str).str.strip()
-    df_bank['Bank_ID'] = df_bank['Bank_ID'].astype(str).str.strip()
-    
-    # Переименовываем колонку 'Status' в банковском файле для унификации
-    df_bank = df_bank.rename(columns={'Status': 'Transaction_status'})
-    
-    # Нормализуем статусы (переводим в нижний регистр и убираем пробелы), чтобы избежать ложных расхождений
-    df_internal['Transaction_status'] = df_internal['Transaction_status'].astype(str).str.strip().str.lower()
-    df_bank['Transaction_status'] = df_bank['Transaction_status'].astype(str).str.strip().str.lower()
-    
-    # Округляем суммы до 2 знаков после запятой
-    df_internal['Transaction_amount'] = df_internal['Transaction_amount'].round(2)
-    df_bank['Transaction_amount'] = df_bank['Transaction_amount'].round(2)
+# --- Step 2: Data Cleaning & Standardization ---
 
-    # 3. Полное совпадение (Идеальный мэтч по ID, Сумме и Статусу одновременно)
-    # Используем inner join по списку ключевых колонок
-    matched = pd.merge(
-        df_internal, 
-        df_bank, 
-        left_on=['Transaction_ID', 'Transaction_amount', 'Transaction_status'], 
-        right_on=['Bank_ID', 'Transaction_amount', 'Transaction_status'], 
-        how='inner'
-    )
-    
-    # 4. Поиск расхождений (Unmatched)
-    # Находим всё, что НЕ вошло в таблицу идеальных совпадений
-    
-    # Ошибки со стороны нашей системы (есть в 1С, но нет полного совпадения в банке)
-    # Проверяем по связке ID + Сумма + Статус
-    internal_keys = df_internal['Transaction_ID'] + "_" + df_internal['Transaction_amount'].astype(str) + "_" + df_internal['Transaction_status']
-    matched_keys_internal = matched['Transaction_ID'] + "_" + matched['Transaction_amount'].astype(str) + "_" + matched['Transaction_status']
-    missing_in_bank = df_internal[~internal_keys.isin(matched_keys_internal)]
-    
-    # Ошибки со стороны банка (есть в банке, но нет полного совпадения у нас)
-    bank_keys = df_bank['Bank_ID'] + "_" + df_bank['Transaction_amount'].astype(str) + "_" + df_bank['Transaction_status']
-    matched_keys_bank = matched['Bank_ID'] + "_" + matched['Transaction_amount'].astype(str) + "_" + matched['Transaction_status']
-    missing_in_internal = df_bank[~bank_keys.isin(matched_keys_bank)]
+# Convert IDs to strings and remove leading/trailing whitespaces
+df_internal['Transaction_ID'] = df_internal['Transaction_ID'].astype(str).str.strip()
+df_bank['Bank_ID'] = df_bank['Bank_ID'].astype(str).str.strip()
 
-    # 5. Сохраняем результат в Excel
-    with pd.ExcelWriter('reconciliation_report.xlsx') as writer:
-        matched.to_excel(writer, sheet_name='Сверенные (Идеал)', index=False)
-        missing_in_bank.to_excel(writer, sheet_name='Расхождения у нас', index=False)
-        missing_in_internal.to_excel(writer, sheet_name='Расхождения в банке', index=False)
-        
-    print(f"\nСверка успешно завершена! Создан файл 'reconciliation_report.xlsx'")
-    print(f"Полностью совпало: {len(matched)} транзакций.")
-    print(f"Проблемные строки в нашей системе (не совпал ID/сумма/статус): {len(missing_in_bank)} шт.")
-    print(f"Проблемные строки в выписке банка (не совпал ID/сумма/статус): {len(missing_in_internal)} шт.")
+# Standardize status column names across both files
+df_bank = df_bank.rename(columns={'Status': 'Transaction_status', 'status': 'Transaction_status'})
+df_internal = df_internal.rename(columns={'Transaction_Status': 'Transaction_status', 'transaction_status': 'Transaction_status'})
 
-if __name__ == "__main__":
-    run_reconciliation()
+# Standardize amount column names to 'Amount' to match your source files exactly
+df_internal = df_internal.rename(columns={'Transaction_Amount': 'Amount', 'transaction_amount': 'Amount', 'amount': 'Amount'})
+df_bank = df_bank.rename(columns={'Transaction_Amount': 'Amount', 'transaction_amount': 'Amount', 'amount': 'Amount'})
+
+# Convert statuses to lowercase to prevent mismatch due to casing (e.g., 'Success' vs 'success')
+df_internal['Transaction_status'] = df_internal['Transaction_status'].astype(str).str.strip().str.lower()
+df_bank['Transaction_status'] = df_bank['Transaction_status'].astype(str).str.strip().str.lower()
+
+# Round amounts to 2 decimal places to prevent floating-point precision issues
+df_internal['Amount'] = df_internal['Amount'].round(2)
+df_bank['Amount'] = df_bank['Amount'].round(2)
+
+print("✅ Data successfully cleaned and standardized!")
+
+# --- Step 3: Combine Data Using Outer Join ---
+# Python automatically appends suffixes _x (internal) and _y (bank) to overlapping columns
+df_recon = pd.merge(
+    df_internal, 
+    df_bank, 
+    left_on='Transaction_ID', 
+    right_on='Bank_ID', 
+    how='outer'
+)
+
+# --- Step 4: Create Masks for Mismatches & Exceptions ---
+
+# Filter 1: ID matches, but transaction amounts differ
+mask_diff_amount = (df_recon['Transaction_ID'].notna()) & (df_recon['Bank_ID'].notna()) & (df_recon['Amount_x'] != df_recon['Amount_y'])
+
+# Filter 2: ID matches, but transaction statuses differ
+mask_diff_status = (df_recon['Transaction_ID'].notna()) & (df_recon['Bank_ID'].notna()) & (df_recon['Transaction_status_x'] != df_recon['Transaction_status_y'])
+
+# Filter 3: Transaction exists in internal ledger but missing in bank statement
+mask_missing_in_bank = df_recon['Bank_ID'].isna()
+
+# Filter 4: Transaction exists in bank statement but missing in internal ledger
+mask_missing_in_internal = df_recon['Transaction_ID'].isna()
+
+# Filter 5: Perfect match (ID, Amount, and Status match perfectly)
+mask_perfect_match = (df_recon['Transaction_ID'].notna()) & (df_recon['Bank_ID'].notna()) & (df_recon['Amount_x'] == df_recon['Amount_y']) & (df_recon['Transaction_status_x'] == df_recon['Transaction_status_y'])
+
+# --- Step 5: Separate Matches and Discrepancies ---
+df_perfect = df_recon[mask_perfect_match].copy()
+df_discrepancies = df_recon[mask_diff_amount | mask_diff_status | mask_missing_in_bank | mask_missing_in_internal].copy()
+
+# --- Step 6: Format Discrepancies Report ---
+# Rename columns for clear Side-by-Side business presentation
+df_discrepancies = df_discrepancies.rename(columns={
+    'Transaction_ID': 'ID (Internal System)',
+    'Bank_ID': 'ID (Bank Statement)',
+    'Amount_x': 'Amount (Internal System)',
+    'Amount_y': 'Amount (Bank Statement)',
+    'Transaction_status_x': 'Status (Internal System)',
+    'Transaction_status_y': 'Status (Bank Statement)'
+})
+
+# Keep only the essential columns in a logical side-by-side order
+final_cols = [
+    'ID (Internal System)', 'ID (Bank Statement)', 
+    'Amount (Internal System)', 'Amount (Bank Statement)', 
+    'Status (Internal System)', 'Status (Bank Statement)'
+]
+df_discrepancies = df_discrepancies[final_cols]
+
+# --- Step 7: Export Results to Excel ---
+with pd.ExcelWriter('reconciliation_report_side_by_side.xlsx') as writer:
+    df_discrepancies.to_excel(writer, sheet_name='All Discrepancies', index=False)
+    df_perfect.to_excel(writer, sheet_name='Perfect Matches', index=False)
+
+print("\n🔥 New Side-by-Side reconciliation report successfully generated!")
+print(f"Total discrepancy rows found: {len(df_discrepancies)}")
+print(f"Total perfectly matched rows: {len(df_perfect)}")
